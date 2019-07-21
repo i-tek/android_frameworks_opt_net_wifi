@@ -250,10 +250,10 @@ public class WifiInjector {
                 mPasspointManager, mWifiConfigManager, mConnectivityLocalLog);
         mWifiMetrics.setPasspointManager(mPasspointManager);
         mScanRequestProxy = new ScanRequestProxy(mContext,
+                mWifiStateMachineHandlerThread.getLooper(),
                 (AppOpsManager) mContext.getSystemService(Context.APP_OPS_SERVICE),
                 (ActivityManager) mContext.getSystemService(Context.ACTIVITY_SERVICE),
-                this, mWifiConfigManager,
-                mWifiPermissionsUtil, mWifiMetrics, mClock);
+                this, mWifiConfigManager, mWifiPermissionsUtil, mWifiMetrics, mClock);
         mSarManager = new SarManager(mContext, makeTelephonyManager(), wifiStateMachineLooper,
                 mWifiNative, new SystemSensorManager(mContext, wifiStateMachineLooper));
         if (mUseRealLogger) {

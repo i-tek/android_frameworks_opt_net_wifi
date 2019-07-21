@@ -21,12 +21,16 @@ import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.Intent;
+import android.database.ContentObserver;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiScanner;
 import android.os.Binder;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.UserHandle;
 import android.os.WorkSource;
+import android.provider.Settings;
 import android.util.ArrayMap;
 import android.util.Log;
 import android.util.Pair;
@@ -74,13 +78,16 @@ public class ScanRequestProxy {
     public static final int SCAN_REQUEST_THROTTLE_INTERVAL_BG_APPS_MS = 30 * 60 * 1000;
 
     private final Context mContext;
+    private final Handler mHandler;
     private final AppOpsManager mAppOps;
     private final ActivityManager mActivityManager;
+    private final FrameworkFacade mFrameworkFacade;
     private final WifiInjector mWifiInjector;
     private final WifiConfigManager mWifiConfigManager;
     private final WifiPermissionsUtil mWifiPermissionsUtil;
     private final WifiMetrics mWifiMetrics;
     private final Clock mClock;
+    private final ScanThrottlingEnabledSettingObserver mSettingScanThrottlingObserver;
     private WifiScanner mWifiScanner;
 
     // Verbose logging flag.
@@ -89,6 +96,8 @@ public class ScanRequestProxy {
     private boolean mScanningForHiddenNetworksEnabled = false;
     // Flag to indicate that we're waiting for scan results from an existing request.
     private boolean mIsScanProcessingComplete = true;
+    // Flag to indicate that Wi-Fi scan requests should be throttled.
+    private boolean mSettingScanThrottlingEnabled = true;
     // Timestamps for the last scan requested by any background app.
     private long mLastScanTimestampForBgApps = 0;
     // Timestamps for the list of last few scan requests by each foreground app.
@@ -147,17 +156,23 @@ public class ScanRequestProxy {
         }
     };
 
-    ScanRequestProxy(Context context, AppOpsManager appOpsManager, ActivityManager activityManager,
-                     WifiInjector wifiInjector, WifiConfigManager configManager,
-                     WifiPermissionsUtil wifiPermissionUtil, WifiMetrics wifiMetrics, Clock clock) {
+    ScanRequestProxy(Context context, Looper looper, AppOpsManager appOpsManager,
+                     ActivityManager activityManager, WifiInjector wifiInjector,
+                     WifiConfigManager configManager, WifiPermissionsUtil wifiPermissionUtil,
+                     WifiMetrics wifiMetrics, Clock clock) {
         mContext = context;
+        mHandler = new Handler(looper);
         mAppOps = appOpsManager;
         mActivityManager = activityManager;
+        mFrameworkFacade = wifiInjector.getFrameworkFacade();
         mWifiInjector = wifiInjector;
         mWifiConfigManager = configManager;
         mWifiPermissionsUtil = wifiPermissionUtil;
         mWifiMetrics = wifiMetrics;
         mClock = clock;
+
+        mSettingScanThrottlingObserver = new ScanThrottlingEnabledSettingObserver(mHandler);
+        mSettingScanThrottlingObserver.register();
     }
 
     /**
@@ -346,6 +361,10 @@ public class ScanRequestProxy {
         return isThrottled;
     }
 
+    private boolean isScanRequestThrottlingEnabled() {
+        return mSettingScanThrottlingEnabled;
+    }
+
     /**
      * Initiate a wifi scan.
      *
@@ -362,7 +381,8 @@ public class ScanRequestProxy {
                 mWifiPermissionsUtil.checkNetworkSettingsPermission(callingUid)
                         || mWifiPermissionsUtil.checkNetworkSetupWizardPermission(callingUid);
         // Check and throttle scan request from apps without NETWORK_SETTINGS permission.
-        if (!fromSettingsOrSetupWizard
+        if (isScanRequestThrottlingEnabled()
+                && (!fromSettingsOrSetupWizard)
                 && shouldScanRequestBeThrottledForApp(callingUid, packageName)) {
             Log.i(TAG, "Scan request from " + packageName + " throttled");
             sendScanResultFailureBroadcastToPackage(packageName);
@@ -423,5 +443,32 @@ public class ScanRequestProxy {
                     + packageName);
         }
         mLastScanTimestampsForFgApps.remove(Pair.create(uid, packageName));
+    }
+
+
+    private class ScanThrottlingEnabledSettingObserver extends ContentObserver {
+        ScanThrottlingEnabledSettingObserver(Handler handler) {
+            super(handler);
+        }
+
+        public void register() {
+            mFrameworkFacade.registerContentObserver(mContext,
+                    Settings.Global.getUriFor(Settings.Global.WIFI_SCAN_THROTTLING_ENABLED), true, this);
+            mSettingScanThrottlingEnabled = getValue();
+        }
+
+        @Override
+        public void onChange(boolean selfChange) {
+            super.onChange(selfChange);
+            mSettingScanThrottlingEnabled = getValue();
+        }
+
+        private boolean getValue() {
+            boolean enabled = mFrameworkFacade.getIntegerSetting(mContext,
+                    Settings.Global.WIFI_SCAN_THROTTLING_ENABLED, 0) == 1;
+            //mWifiMetrics.setIsWifiNetworksAvailableNotificationEnabled(mTag, enabled);
+            Log.d(TAG, "Setting \"wifi scan throttling\" enabled=" + enabled);
+            return enabled;
+        }
     }
 }
